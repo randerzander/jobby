@@ -73,14 +73,20 @@ func makeInterfaces(vals []string) []interface{}{
   return args
 }
 
-func runTxn(statement string, vals []string){
+type Statement struct {
+  Statement string
+  Args []string
+}
+func runTxn(statements []Statement){
   txn, err := db.Begin()
   handle(err, "Creating a transaction")
-  stmt, err := txn.Prepare(statement)
-  handle(err, "Preparing statement")
-  defer stmt.Close()
-  _, err = stmt.Exec(makeInterfaces(vals)...)
-  handle(err, "Executing statement")
+  for i, statement := range statements{
+    stmt, err := txn.Prepare(statement)
+    handle(err, "Preparing statement")
+    defer stmt.Close()
+    _, err = stmt.Exec(makeInterfaces(vals)...)
+    handle(err, "Executing statement")
+  }
   txn.Commit()
 }
 
@@ -88,10 +94,10 @@ func parse(r *http.Request) (string, url.Values){
   return strings.Join(strings.Split(r.URL.Path, "/")[2:], "/"), r.URL.Query()
 }
 
-const startStatement = "insert into records(job, start, stop, params) values(?, ?, ?, ?)"
+const startRecordStatement = "insert into records(job, start, stop) values(?, ?, ?, ?)"
+const startParamsStatement = "insert into params(job, start, paramName, paramValue) values(?, ?, ?, ?)"
 func start(w http.ResponseWriter, r *http.Request){
   task, params := parse(r)
-
   textParams, err := json.Marshal(params)
   handle(err, "Parsing params into json")
 
@@ -101,13 +107,19 @@ func start(w http.ResponseWriter, r *http.Request){
     w.WriteHeader(400)
     fmt.Fprintf(w, "%s", "Error: " + task + " already started.")
   }else{
-    runTxn(startStatement, []string{task, strconv.FormatInt(now, 10), "-1", string(textParams)})
+    statements := []Statement{Statement{startRecordStatement, []string{task, now, "-1", string(textParams)}}}
+    for param, value := range params {
+      log.Print("Inserting ", param, " ", value)
+      statements = append(statements, Statement{startParamsStatement, []string{task, now, param, strings.Join(value, " ")}})
+    }
+    runTxn(statements)
     w.WriteHeader(200)
     tasks[task] = true;
   }
 }
 
-const stopStatement = "update records set stop=?, params=params||'|'||? where job=? and stop=-1;"
+const stopRecordStatement = "update records set stop=?, params=params||'|'||? where job=? and stop=-1;"
+const stopParamsStatement = "insert into params(job, stop, paramName, paramValue) values(?, ?, ?, ?)"
 func stop(w http.ResponseWriter, r *http.Request){
   task, params := parse(r)
 
@@ -116,7 +128,12 @@ func stop(w http.ResponseWriter, r *http.Request){
 
   now := time.Now().UTC().UnixNano()
   if checkStarted(task, now){
-    runTxn(stopStatement, []string{strconv.FormatInt(now, 10), string(textParams), task})
+    statements := []Statement{Statement{stopRecordStatement, []string{now, string(textParams), task}}}
+    for param, value := range params {
+      log.Print("Inserting ", param, " ", value)
+      statements = append(statements, Statement{stopParamsStatement, []string{task, now, param, strings.Join(value, " ")}})
+    }
+    runTxn(statements)
     w.WriteHeader(200)
     tasks[task] = false
   }else{
@@ -196,9 +213,16 @@ func history(w http.ResponseWriter, r *http.Request){
 }
 
 var db *sql.DB
-const recordsDDL = "create table if not exists records (job text not null, start integer, stop integer, params string);"
-const jobsDDL = "create table if not exists jobs (job text not null primary key, average real, stddev real, median real, params string);"
-const jobsIndex = "create unique index if not exists jobsIndex on jobs(job);"
+const recordsDDL = `
+        create table if not exists records (job text not null, start integer, stop integer);
+      `
+const paramsDDL = `
+        create table if not exists recordParams (job text not null, start integer, paramName, paramValue);
+      `
+const jobsDDL = `
+        create table if not exists jobs (job text not null primary key, average real, stddev real, median real, params string);
+        create unique index if not exists jobsIndex on jobs(job);
+      `
 var DDLs = []string{recordsDDL, jobsDDL, jobsIndex}
 func init(){
   var err error
