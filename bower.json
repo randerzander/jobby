@@ -1,0 +1,22 @@
+{
+  "name": "statsus",
+  "version": "0.0.0",
+  "authors": [
+    "Randy Gelhausen <richard.a.gelhausen@accenture.com>"
+  ],
+  "license": "MIT",
+  "private": true,
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "test",
+    "tests"
+  ],
+  "dependencies": {
+    "bootstrap": "~3.0.0",
+    "datatables": "~1.9.4",
+    "jquery": "~2.0.3",
+    "nvd3": "https://github.com/novus/nvd3"
+  }
+}
