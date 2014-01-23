@@ -8,12 +8,14 @@ import(
  "strings"
  "strconv"
 
- "encoding/json"
  "io/ioutil"
+ "encoding/json"
  "net/http"
  "net/url"
  "database/sql"
  "github.com/mattn/go-sqlite3"
+
+ my "jobby/server/structs"
 )
 
 func handle(err error, desc string){
@@ -27,40 +29,23 @@ func handle(err error, desc string){
   }
 }
 
-var files map[string]string
-func static(w http.ResponseWriter, r *http.Request) {
-  fn := "." + r.URL.Path
-  if _, ok := files[fn]; !ok {
-    text, err := ioutil.ReadFile(fn)
-    files[fn] = string(text)
-    handle(err, "Reading " + fn)
-  }
-  ext := strings.Split(fn, ".")[len(strings.Split(fn, ".")) - 1]
-  switch ext{
-  case "js": w.Header().Add("content-type", "application/javascript")
-  case "css": w.Header().Add("content-type", "text/css")
-  }
-  fmt.Fprintf(w, "%s", files[fn])
-}
-
-var tasks map[string]bool
-const startedQuery = "select * from records where job=? and stop=-1;"
-func checkStarted(task string, now int64) bool {
+var jobs map[string]bool
+func checkStarted(job string, now int64) bool {
   var ret bool
-  if state, ok := tasks[task]; ok {
+  if state, ok := jobs[job]; ok {
     ret = state
   }else{
-    q, err := db.Prepare(startedQuery)
-    handle(err, "Checking if " + task + " is already running")
+    q, err := db.Prepare(queries["startedQuery"])
+    handle(err, "Checking if " + job + " is already running")
     var tmp string
-    err = q.QueryRow(task).Scan(&tmp)
+    err = q.QueryRow(job).Scan(&tmp)
     switch {
     case err == sql.ErrNoRows:
       ret = false
     case err != nil:
       ret = true
     }
-    tasks[task] = ret
+    jobs[job] = ret
   }
   return ret
 }
@@ -73,87 +58,17 @@ func makeInterfaces(vals []string) []interface{}{
   return args
 }
 
-type Statement struct {
-  Statement string
-  Args []string
-}
-func runTxn(statements []Statement){
+func runTxn(statements []my.Statement){
   txn, err := db.Begin()
   handle(err, "Creating a transaction")
-  for i, statement := range statements{
-    stmt, err := txn.Prepare(statement)
-    handle(err, "Preparing statement")
+  for _, statement := range statements{
+    stmt, err := txn.Prepare(statement.Statement)
+    handle(err, "Preparing " + statement.Statement)
     defer stmt.Close()
-    _, err = stmt.Exec(makeInterfaces(vals)...)
+    _, err = stmt.Exec(makeInterfaces(statement.Args)...)
     handle(err, "Executing statement")
   }
   txn.Commit()
-}
-
-func parse(r *http.Request) (string, url.Values){
-  return strings.Join(strings.Split(r.URL.Path, "/")[2:], "/"), r.URL.Query()
-}
-
-const startRecordStatement = "insert into records(job, start, stop) values(?, ?, ?, ?)"
-const startParamsStatement = "insert into params(job, start, paramName, paramValue) values(?, ?, ?, ?)"
-func start(w http.ResponseWriter, r *http.Request){
-  task, params := parse(r)
-  textParams, err := json.Marshal(params)
-  handle(err, "Parsing params into json")
-
-  now := time.Now().UTC().UnixNano()
-
-  if checkStarted(task, now){
-    w.WriteHeader(400)
-    fmt.Fprintf(w, "%s", "Error: " + task + " already started.")
-  }else{
-    statements := []Statement{Statement{startRecordStatement, []string{task, now, "-1", string(textParams)}}}
-    for param, value := range params {
-      log.Print("Inserting ", param, " ", value)
-      statements = append(statements, Statement{startParamsStatement, []string{task, now, param, strings.Join(value, " ")}})
-    }
-    runTxn(statements)
-    w.WriteHeader(200)
-    tasks[task] = true;
-  }
-}
-
-const stopRecordStatement = "update records set stop=?, params=params||'|'||? where job=? and stop=-1;"
-const stopParamsStatement = "insert into params(job, stop, paramName, paramValue) values(?, ?, ?, ?)"
-func stop(w http.ResponseWriter, r *http.Request){
-  task, params := parse(r)
-
-  textParams, err := json.Marshal(params)
-  handle(err, "Parsing params into json")
-
-  now := time.Now().UTC().UnixNano()
-  if checkStarted(task, now){
-    statements := []Statement{Statement{stopRecordStatement, []string{now, string(textParams), task}}}
-    for param, value := range params {
-      log.Print("Inserting ", param, " ", value)
-      statements = append(statements, Statement{stopParamsStatement, []string{task, now, param, strings.Join(value, " ")}})
-    }
-    runTxn(statements)
-    w.WriteHeader(200)
-    tasks[task] = false
-  }else{
-    w.WriteHeader(400)
-    fmt.Fprintf(w, "%s", "Error: " + task + " not running.")
-  }
-  go updateJobStats(task)
-}
-
-const updateJobStatement = "replace into jobs select job, avg(stop-start), stdev(stop-start), median(stop-start) from records where stop != -1 and job=?;"
-func updateJobStats(task string){
-  txn, err := db.Begin()
-  handle(err, "Creating a transaction")
-  stmt, err := txn.Prepare(statement)
-  handle(err, "Preparing statement")
-  defer stmt.Close()
-  _, err = stmt.Exec(makeInterfaces(vals)...)
-  handle(err, "Executing statement")
-  txn.Commit()
-  runTxn(updateJobStatement, []string{task})
 }
 
 func runQuery(query string, vals []string) *sql.Rows {
@@ -162,25 +77,72 @@ func runQuery(query string, vals []string) *sql.Rows {
   return rows
 }
 
-const statusQuery = `
-    select jobs.job, start, average, params from records
-    join jobs on records.job = jobs.job
-    where stop =-1;
-  `
-type Job struct{
-  Start int64
-  Average float64
-  Params string
+func parse(r *http.Request) (string, url.Values){
+  return strings.Join(strings.Split(r.URL.Path, "/")[2:], "/"), r.URL.Query()
 }
-func status(w http.ResponseWriter, r *http.Request){
-  jobs := make(map[string]Job)
 
-  rows := runQuery(statusQuery, []string{})
+//TODO impl for qualitative param tracking
+//Makes records of job starts/stops
+func record(w http.ResponseWriter, r *http.Request){
+  job, queryParams := parse(r)
+
+  now := time.Now().UTC().UnixNano()
+  //Determine if attempting to start or stop the job
+  starting := strings.Split(r.URL.Path, "/")[1] == "start"
+  var errString, recordStatement string
+  var recordArgs []string
+  if starting {
+    //attempting to start the job
+    errString = "Error: " + job + " already started."
+    recordStatement = queries["startRecordStatement"]
+    recordArgs = []string{job, strconv.FormatInt(now, 10), "-1"}
+  }else{
+    //attempting to stop the job
+    errString = "Error: " + job + " is not running."
+    recordStatement = queries["stopRecordStatement"]
+    recordArgs = []string{strconv.FormatInt(now, 10), job}
+  }
+
+  if (checkStarted(job, now) && starting) || (!checkStarted(job, now) && !starting){
+    //If the job is already running and attempting to start the job
+    //Or if the job is not running and attempting to stop the job
+    w.WriteHeader(400)
+    fmt.Fprintf(w, "%s", errString)
+  }else{
+    statements := []my.Statement{my.Statement{recordStatement, recordArgs}}
+    if len(queryParams) > 0 {
+      //TODO differentiate between quant/qual param types
+      statements = append(statements, my.Statement{queries["quantParamsStatement"], []string{}})
+      index := 0
+      for queryParam, value := range queryParams {
+        if index >= 1{
+          statements[1].Statement += ", union select ?, ?, ?, ?"
+        }
+        statements[1].Args = append(statements[1].Args, job, strconv.FormatInt(now, 10), queryParam, value[0])
+        index++
+      }
+    }
+    runTxn(statements)
+    w.WriteHeader(200)
+    jobs[job] = starting;
+    if !starting {
+      go updateJobStats(job)
+    }
+  }
+}
+
+//TODO finish computing jobQuantParams
+func updateJobStats(job string){
+  runTxn([]my.Statement{my.Statement{queries["updateJobStatsStatement"], []string{job}}})
+}
+
+func status(w http.ResponseWriter, r *http.Request){
+  jobs := []my.RunningJob{}
+  rows := runQuery(queries["statusQuery"], []string{})
   for rows.Next(){
-    var key string
-    job := Job{}
-    rows.Scan(&key, &job.Start, &job.Average, &job.Params)
-    jobs[key] = job
+    j := my.RunningJob{}
+    rows.Scan(&j.Job, &j.Start, &j.Average)
+    jobs = append(jobs, j)
   }
   err := rows.Err()
   handle(err, "Iterating over status query results")
@@ -190,40 +152,24 @@ func status(w http.ResponseWriter, r *http.Request){
   fmt.Fprintf(w, "%s", string(text))
 }
 
-type Record struct{
-  Job string
-  Start int64
-  Stop int64
-  Params string
-}
-const jobHistoryQuery = "select * from records where job like '?%';"
 func history(w http.ResponseWriter, r *http.Request){
-  task, _ := parse(r)
-  rows := runQuery(strings.Replace(jobHistoryQuery, "?", task, -1), []string{})
-  records := []Record{}
+  job, _ := parse(r)
+  //TODO file github.com/mattn/sqlite3 issue for query prepping when a var is inside quotes: eg.. select * from table where col like '%?%'
+  rows := runQuery(strings.Replace(queries["jobHistoryQuery"], "?", job, -1), []string{})
+  jobRecords := []my.JobRecord{}
   for rows.Next(){
-    record := Record{}
-    rows.Scan(&record.Job, &record.Start, &record.Stop, &record.Params)
-    records = append(records, record)
+    j := my.JobRecord{}
+    rows.Scan(&j.Job, &j.Start, &j.Stop)
+    jobRecords = append(jobRecords, j)
   }
 
-  text, err := json.Marshal(records)
+  text, err := json.Marshal(jobRecords)
   handle(err, "Marshalling records into json")
   fmt.Fprintf(w, "%s", string(text))
 }
 
 var db *sql.DB
-const recordsDDL = `
-        create table if not exists records (job text not null, start integer, stop integer);
-      `
-const paramsDDL = `
-        create table if not exists recordParams (job text not null, start integer, paramName, paramValue);
-      `
-const jobsDDL = `
-        create table if not exists jobs (job text not null primary key, average real, stddev real, median real, params string);
-        create unique index if not exists jobsIndex on jobs(job);
-      `
-var DDLs = []string{recordsDDL, jobsDDL, jobsIndex}
+var queries map[string]string
 func init(){
   var err error
   sql.Register("sqlite3_with_extensions",
@@ -231,26 +177,33 @@ func init(){
   db, err = sql.Open("sqlite3_with_extensions", "./jobs.db")
   handle(err, "Opening connection to sqlite")
 
-  for _, ddl := range DDLs{
-    _, err = db.Exec(ddl)
-    handle(err, "Executing DDL: " + ddl)
+  text, err := ioutil.ReadFile("./queries.conf")
+  handle(err, "Reading query file")
+  queries = make(map[string]string)
+  err = json.Unmarshal(text, &queries)
+  handle(err, "Unmarshaling queries into map")
+
+  for queryName, query := range queries{
+    if strings.Contains(queryName, "DDL"){
+      _, err = db.Exec(query)
+      handle(err, "Executing DDL: " + query)
+    }
   }
 
-  tasks = make(map[string]bool)
-  files = make(map[string]string)
+  jobs = make(map[string]bool)
 }
 
 func main() {
   //static files
-  http.HandleFunc("/www/", static)
-  http.HandleFunc("/bower_components/", static)
+  http.Handle("/", http.FileServer(http.Dir("./www")))
+  http.Handle("/bower_components/", http.StripPrefix("/bower_components", http.FileServer(http.Dir("./bower_components"))))
 
   //data services
-  http.HandleFunc("/start/", start)
-  http.HandleFunc("/stop/", stop)
+  http.HandleFunc("/start/", record)
+  http.HandleFunc("/stop/", record)
   http.HandleFunc("/history/", history)
   http.HandleFunc("/status", status)
 
   log.Print("Starting..")
-  http.ListenAndServe(":8080", nil)
+  http.ListenAndServe(":9090", nil)
 }

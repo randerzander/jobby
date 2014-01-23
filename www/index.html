@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" ng-app="jobby">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,16 +10,18 @@
     <title>Jobber</title>
 
     <!-- Bootstrap core CSS -->
-    <link href="../bower_components/bootstrap/dist/css/bootstrap.css" rel="stylesheet">
+    <link href="bower_components/bootstrap/dist/css/bootstrap.css" rel="stylesheet">
 
     <!-- Custom styles for this template -->
-    <link href="../bower_components/bootstrap/examples/starter-template/starter-template.css" rel="stylesheet">
+    <link href="bower_components/bootstrap/examples/starter-template/starter-template.css" rel="stylesheet">
 
     <!-- HTML5 shim and Respond.js IE8 support of HTML5 elements and media queries -->
     <!--[if lt IE 9]>
       <script src="../../assets/js/html5shiv.js"></script>
       <script src="../../assets/js/respond.min.js"></script>
     <![endif]-->
+    <script src="bower_components/angular/angular.js"></script>
+    <script src="js/controllers.js"></script>
   </head>
 
   <body>
@@ -47,21 +49,25 @@
 
     <div class="container">
 
-      <div class="starter-template">
+      <div class="starter-template" ng-controller="runningJobsCtrl">
         <h1>Running Jobs</h1>
-        <table id="allJobs" class="table table-striped table-bordered table-condensed">
-          <tr><th>JobName</th><th>StartTime</th><th>Projected EndTime</th><th>ETC</th></tr>
+        <table class="table table-striped table-bordered table-condensed">
+          <th>JobName</th><th>StartTime</th><th>Projected EndTime</th><th>ETC</th>
+            <tr ng-repeat="j in runningJobs">
+              <td>{{j.job}}</td>
+              <td>{{j.startTime}}</td>
+              <td>{{j.endTime}}</td>
+              <td>{{j.ETC}}</td>
+            </tr>
+        </table>
       </div>
 
     </div><!-- /.container -->
 
-
     <!-- Bootstrap core JavaScript
     ================================================== -->
     <!-- Placed at the end of the document so the pages load faster -->
-    <script src="../bower_components/jquery/jquery.js"></script>
-    <script src="../bower_components/bootstrap/dist/js/bootstrap.js"></script>
-    <script src="../bower_components/datatables/media/js/jquery.dataTables.js"></script>
-    <script src="js/jobber.js"></script>
+    <script src="bower_components/jquery/jquery.js"></script>
+    <script src="bower_components/bootstrap/dist/js/bootstrap.js"></script>
   </body>
 </html>
